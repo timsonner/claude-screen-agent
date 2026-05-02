@@ -2,7 +2,7 @@
 
 A Python prototype that gives Claude direct access to a live stream of the desktop, so it can observe what's on screen, reason about it, and decide on actions — closing the observe → infer → act loop on Wayland.
 
-Built milestone-by-milestone (M0–M6). Verified on Ubuntu 25.10 / GNOME 50 / Wayland.
+Built milestone-by-milestone (M0–M6). Verified on Ubuntu 26.04 LTS / GNOME 50 / Wayland.
 
 ## What it does
 
@@ -123,8 +123,8 @@ Run our agent as a client of `gnome-remote-desktop` (over RDP/VNC) instead of as
 
 ## Other known issues / future work
 
-- **Prompt caching doesn't hit** (`cache_read_input_tokens=0`). Opus 4.7's minimum cacheable prefix is 4096 tokens; our system prompt is ~250. Pad with examples or accept full input cost (~$0.018/decision at current sizes).
-- **Coordinate precision.** The model sees a 1280×800 downscale; clicks land within ~30 px of the intended target. Bumping to 2400×1500 (within Opus 4.7's 2576 px max) and using its high-res mode would tighten this.
+- **Prompt caching doesn't hit** (`cache_read_input_tokens=0`). Opus 4.7's minimum cacheable prefix is 4096 tokens; our system prompt is \~250. Pad with examples or accept full input cost (\~$0.018/decision at current sizes).
+- **Coordinate precision.** The model sees a 1280×800 downscale; clicks land within \~30 px of the intended target. Bumping to 2400×1500 (within Opus 4.7's 2576 px max) and using its high-res mode would tighten this.
 - **Single monitor.** `Start` may return multiple streams on multi-monitor setups; we use `streams[0]` only.
 - **Headless/CI** is not set up. Would use `weston --backend=headless` + `xdg-desktop-portal-wlr` (different portal backend than GNOME's).
 
