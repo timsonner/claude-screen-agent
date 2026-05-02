@@ -92,6 +92,9 @@ Other flags:
 | `--duration N` | 45 | Run time in seconds. |
 | `--period N` | 5 | Seconds between Claude calls. |
 | `--prompt "..."` | mode-appropriate default | Instruction sent to Claude each cycle. In `observe`, this is a description prompt; in `act`, it's the goal driving tool use. |
+| `--actuator dry-run\|ydotool` | `dry-run` | In `act` mode only: which actuator handles tool calls. `dry-run` prints intended actions; `ydotool` injects real input (see "Actuation modes" → Option B). |
+| `--max-actions N` | 10 | Hard cap on total executed actions. The run stops when reached — runaway-action safety net. |
+| `--settle SECS` | 0.5 | Seconds to sleep after each `ydotool` call so the UI can render. Ignored for the dry-run actuator. |
 
 Examples:
 
@@ -142,10 +145,40 @@ The agent's actuator is a swappable component (the `Actuator` abstract base in `
    ```sh
    systemctl --user enable --now ydotool.service
    ```
-4. Implement a `YdotoolActuator(Actuator)` in `actuator.py` that shells out to `ydotool mousemove --absolute -- X Y` / `click 0xC0` / `type` / `key`. (`ydotool` uses uinput keycodes; map from the model's `combo` strings.)
-5. In `agent.py`, swap `DryRunActuator(...)` for `YdotoolActuator(...)`.
+4. Run the agent with `--actuator ydotool`:
+   ```sh
+   ANTHROPIC_API_KEY=sk-ant-... .venv/bin/python agent.py \
+       --mode act --actuator ydotool --duration 45 --max-actions 5 \
+       --prompt "..."
+   ```
+   The `YdotoolActuator` class in `actuator.py` already implements the shell-outs to `ydotool mousemove` / `click` / `type` / `key`, including a Linux evdev key map (`super`, `Return`, `Escape`, `Tab`, modifiers, `a–z`, `0–9`, F-keys, arrows). At construction it verifies the binary is on PATH and the daemon socket exists at `$XDG_RUNTIME_DIR/.ydotool_socket` — if either is missing, the agent exits with a setup-fix message before opening a screencast session.
 
 This bypasses the portal entirely and works on any Wayland compositor. Tradeoff: gives the daemon (and anything that talks to it) full keyboard/mouse access — the portal's per-app consent model is gone.
+
+#### Verification — GNOME Activities overview test
+
+A simple end-to-end test that exercises keys + typing without needing pixel-accurate clicks:
+
+```sh
+# 1. Confirm ydotool itself works (no Python). Activities overview should open.
+ydotool key 125:1 125:0
+# Press Esc to close. If this didn't open Activities, fix the setup before going further.
+
+# 2. Dry-run rehearsal — verify Claude emits the right action sequence.
+.venv/bin/python agent.py --mode act --duration 30 --period 4 --max-actions 5 \
+    --prompt "Press Super to open the Activities overview. Once you see the overview, type 'terminal' and press Return to launch a terminal. Use the wait tool between steps to let the UI catch up."
+# Expected printed sequence (across cycles): key:super → wait → type:'terminal' → wait → key:Return
+
+# 3. Real injection.
+ANTHROPIC_API_KEY=sk-ant-... .venv/bin/python agent.py \
+    --mode act --actuator ydotool --duration 45 --period 5 \
+    --max-actions 5 --settle 0.5 \
+    --prompt "Press Super to open the Activities overview. Once you see the overview, type 'terminal' and press Return to launch a terminal. Use the wait tool between steps to let the UI catch up."
+# Expected: Activities overview opens, 'terminal' types into the search box,
+# Enter launches gnome-terminal, the next observed cycle reports the new window.
+```
+
+Common failures: ydotool not in `input` group → permission denied on the socket; daemon not running → "ydotool socket not found"; pressing Super twice within `--period` toggles overview off (mitigated by the `wait` instruction in the prompt + `--settle`).
 
 ### Option C — libei via `ConnectToEIS` (cleanest, but blocked by default on GNOME 50)
 

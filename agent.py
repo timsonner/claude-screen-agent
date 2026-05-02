@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import pathlib
 import sys
 import time
 
@@ -32,7 +33,7 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import GLib  # noqa: E402
 
-from actuator import Actuator, ActionLog, DryRunActuator
+from actuator import Actuator, ActionLog, DryRunActuator, YdotoolActuator
 from capture import Capture
 from dispatcher import Dispatcher
 from inference import ClaudeInferer, IntendedAction
@@ -40,6 +41,8 @@ from portal_remotedesktop import open_screencast_session
 
 DEFAULT_DURATION = 45.0
 DEFAULT_PERIOD = 5.0
+DEFAULT_MAX_ACTIONS = 10
+DEFAULT_SETTLE = 0.5
 
 DEFAULT_ACT_PROMPT = (
     "Watch the screen. Identify the single most prominent actionable element "
@@ -68,7 +71,16 @@ def _execute(action: IntendedAction, actuator: Actuator) -> ActionLog:
     return ActionLog(kind="unknown", detail=f"{name} args={args}")
 
 
-async def _main(mode: str, duration: float, prompt: str, period: float) -> int:
+async def _main(
+    mode: str,
+    duration: float,
+    prompt: str,
+    period: float,
+    actuator_kind: str,
+    max_actions: int,
+    settle: float,
+    save_frames: str | None = None,
+) -> int:
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("ERROR: set ANTHROPIC_API_KEY before running.", file=sys.stderr)
         return 2
@@ -82,15 +94,39 @@ async def _main(mode: str, duration: float, prompt: str, period: float) -> int:
 
     src_w, src_h = handle.stream_props["size"]
     jpeg_size = (cap._width, cap._height)
+    src_size = (src_w, src_h)
     actuator: Actuator | None = None
     if mode == "act":
-        actuator = DryRunActuator(jpeg_size=jpeg_size, src_size=(src_w, src_h))
+        if actuator_kind == "ydotool":
+            try:
+                actuator = YdotoolActuator(
+                    jpeg_size=jpeg_size, src_size=src_size, settle=settle
+                )
+            except RuntimeError as e:
+                print(f"ERROR: ydotool actuator unavailable: {e}", file=sys.stderr)
+                cap.stop()
+                return 3
+            print(f"[agent] actuator: YdotoolActuator (settle={settle}s, max_actions={max_actions})")
+        else:
+            actuator = DryRunActuator(jpeg_size=jpeg_size, src_size=src_size)
+            print(f"[agent] actuator: DryRunActuator (no real injection, max_actions={max_actions})")
 
-    disp = Dispatcher(hamming_threshold=5, jpeg_quality=80)
-    inferer = ClaudeInferer(effort="low", max_tokens=768 if mode == "act" else 512)
+    frames_dir: pathlib.Path | None = None
+    if save_frames:
+        frames_dir = pathlib.Path(save_frames)
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[agent] saving consumed frames → {frames_dir}/")
+
+    disp = Dispatcher(hamming_threshold=5, jpeg_quality=80, verbose=(frames_dir is not None))
+    inferer = ClaudeInferer(
+        effort="medium" if mode == "act" else "low",
+        max_tokens=1024 if mode == "act" else 512,
+        live_mode=(mode == "act" and actuator_kind == "ydotool"),
+    )
 
     stop = asyncio.Event()
     cycles = 0
+    actions_total = 0
 
     async def glib_pump():
         ctx = GLib.MainContext.default()
@@ -109,7 +145,7 @@ async def _main(mode: str, duration: float, prompt: str, period: float) -> int:
             await asyncio.sleep(0.05)
 
     async def consumer():
-        nonlocal cycles
+        nonlocal cycles, actions_total
         await asyncio.sleep(1.5)  # let one frame land first
         while not stop.is_set():
             slot = disp.take()
@@ -117,6 +153,10 @@ async def _main(mode: str, duration: float, prompt: str, period: float) -> int:
                 print("[agent] (no new frame)")
             else:
                 jpeg, seq = slot
+                if frames_dir is not None:
+                    frame_path = frames_dir / f"frame_{seq:06d}.jpg"
+                    frame_path.write_bytes(jpeg)
+                    print(f"[agent] saved {frame_path.name}")
                 t0 = time.monotonic()
                 try:
                     if mode == "act":
@@ -151,10 +191,17 @@ async def _main(mode: str, duration: float, prompt: str, period: float) -> int:
                     else:
                         for a in result.actions:
                             log = _execute(a, actuator)  # type: ignore[arg-type]
+                            actions_total += 1
                             reason = a.args.get("reason", "")
                             print(f"  → {log.kind}: {log.detail}")
                             if reason:
                                 print(f"     reason: {reason}")
+                            if actions_total >= max_actions:
+                                print(
+                                    f"[agent] max-actions ({max_actions}) reached — stopping"
+                                )
+                                stop.set()
+                                break
             try:
                 await asyncio.wait_for(stop.wait(), timeout=period)
             except asyncio.TimeoutError:
@@ -179,7 +226,8 @@ async def _main(mode: str, duration: float, prompt: str, period: float) -> int:
     print()
     print(
         f"=== AGENT RESULT === mode={mode}  captured={cap.frame_count}  "
-        f"dispatched={s.dispatched}  consumed={s.consumed}  cycles={cycles}"
+        f"dispatched={s.dispatched}  consumed={s.consumed}  cycles={cycles}  "
+        f"actions={actions_total}"
     )
     return 0
 
@@ -212,6 +260,32 @@ def _parse_args() -> argparse.Namespace:
         "--prompt",
         help="Mode-appropriate instruction for Claude (uses a sensible default if omitted).",
     )
+    p.add_argument(
+        "--actuator",
+        choices=["dry-run", "ydotool"],
+        default="dry-run",
+        help="dry-run: print intended actions only (default, safe). "
+        "ydotool: real input injection via the ydotool daemon — requires setup, see README.",
+    )
+    p.add_argument(
+        "--max-actions",
+        type=int,
+        default=DEFAULT_MAX_ACTIONS,
+        help=f"stop the run after this many tool-call actions (default {DEFAULT_MAX_ACTIONS}).",
+    )
+    p.add_argument(
+        "--settle",
+        type=float,
+        default=DEFAULT_SETTLE,
+        help=f"seconds to wait after each ydotool call so the UI can render (default {DEFAULT_SETTLE}). "
+        "Ignored for the dry-run actuator.",
+    )
+    p.add_argument(
+        "--save-frames",
+        metavar="DIR",
+        default=None,
+        help="Save each consumed JPEG to DIR/frame_NNNNNN.jpg for debugging.",
+    )
     return p.parse_args()
 
 
@@ -220,4 +294,17 @@ if __name__ == "__main__":
     prompt = args.prompt or (
         DEFAULT_ACT_PROMPT if args.mode == "act" else DEFAULT_OBSERVE_PROMPT
     )
-    sys.exit(asyncio.run(_main(args.mode, args.duration, prompt, args.period)))
+    sys.exit(
+        asyncio.run(
+            _main(
+                args.mode,
+                args.duration,
+                prompt,
+                args.period,
+                args.actuator,
+                args.max_actions,
+                args.settle,
+                save_frames=args.save_frames,
+            )
+        )
+    )

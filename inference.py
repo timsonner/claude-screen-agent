@@ -32,15 +32,22 @@ SYSTEM_PROMPT = """You are a desktop observation assistant. The user will send y
 Do not speculate about what the user should do unless asked. Just observe and report."""
 
 
-SYSTEM_PROMPT_AGENT = """You are a desktop agent that watches a live stream of the user's Linux desktop and decides whether to act.
+_SYSTEM_PROMPT_AGENT_BASE = """You are the sole desktop-control agent. You watch a live stream of a Linux desktop and take actions to accomplish a goal — there is no other agent or executor; every decision is yours.
 
-Each turn you receive a screenshot and a goal. Decide what (if anything) to do next, using the provided tools. Coordinates in tool calls are in the JPEG-space shown to you (dimensions are stated in the user message), not the source resolution — the harness scales them up before any real input would fire.
+Each turn you receive a screenshot and a goal. Before acting, LOOK at the screenshot carefully and identify the CURRENT screen state. Then decide what the NEXT action should be to make progress — do not repeat steps that have already succeeded.
 
 Rules:
-- Use `wait` (or just respond with text) when nothing actionable for the goal is on screen yet.
-- Prefer one decisive action per turn. The agent will send a fresh frame after it executes.
-- Keep your text rationale short — one sentence explaining what you decided and why.
-- Tool calls run in DRY-RUN mode on this system (printed, not actually injected). Be specific anyway: real actuation can be enabled later by swapping the actuator implementation."""
+- Observe first: look at the screenshot and identify what state the desktop is currently in (e.g., "GNOME Activities overview is open with a search bar visible", "desktop is idle", "terminal is open").
+- Act on current state: if the screenshot shows a step has already been completed (e.g., GNOME Activities is already open — you see a search/Type-to-search bar at the top), skip that step and do the NEXT one.
+- Act decisively: if the goal requires clicking, typing, or pressing a key, do it now — don't wait unless the UI genuinely hasn't loaded yet.
+- Prefer one action per turn. A fresh frame will arrive after it executes.
+- Use `wait` only when the screen is visibly mid-transition and acting would be premature.
+- Keep your text rationale to one sentence."""
+
+_DRY_RUN_NOTE = "\n- Tool calls run in DRY-RUN mode on this system (printed, not actually injected). Be specific anyway: real actuation can be enabled later by swapping the actuator implementation."
+_LIVE_NOTE = "\n- Tool calls are LIVE: every action you emit will be injected into the real desktop immediately. Be precise and deliberate."
+
+SYSTEM_PROMPT_AGENT = _SYSTEM_PROMPT_AGENT_BASE + _DRY_RUN_NOTE
 
 
 AGENT_TOOLS = [
@@ -149,6 +156,7 @@ class ClaudeInferer(Inferer):
         model: str = "claude-opus-4-7",
         max_tokens: int = 512,
         effort: str = "low",
+        live_mode: bool = False,
     ):
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise RuntimeError("ANTHROPIC_API_KEY is not set")
@@ -156,6 +164,9 @@ class ClaudeInferer(Inferer):
         self._model = model
         self._max_tokens = max_tokens
         self._effort = effort
+        self._system_prompt_agent = (
+            _SYSTEM_PROMPT_AGENT_BASE + (_LIVE_NOTE if live_mode else _DRY_RUN_NOTE)
+        )
 
     async def observe(
         self, jpeg_bytes: bytes, *, instruction: Optional[str] = None
@@ -221,7 +232,7 @@ class ClaudeInferer(Inferer):
             system=[
                 {
                     "type": "text",
-                    "text": SYSTEM_PROMPT_AGENT,
+                    "text": self._system_prompt_agent,
                     "cache_control": {"type": "ephemeral"},
                 }
             ],

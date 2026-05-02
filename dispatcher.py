@@ -71,9 +71,11 @@ class Dispatcher:
         *,
         hamming_threshold: int = 5,
         jpeg_quality: int = 80,
+        verbose: bool = False,
     ):
         self._threshold = hamming_threshold
         self._jpeg_quality = jpeg_quality
+        self._verbose = verbose
         self._lock = threading.Lock()
         self._slot: tuple[bytes, int] | None = None  # (jpeg_bytes, seq)
         self._last_dispatched_hash: int | None = None
@@ -87,6 +89,11 @@ class Dispatcher:
         ):
             self._stats.dropped_unchanged += 1
             return
+        dist = (
+            _hamming(h, self._last_dispatched_hash)
+            if self._last_dispatched_hash is not None
+            else "init"
+        )
         jpeg = _to_jpeg(frame.array, quality=self._jpeg_quality)
         with self._lock:
             if self._slot is not None:
@@ -94,14 +101,25 @@ class Dispatcher:
             self._slot = (jpeg, frame.seq)
         self._last_dispatched_hash = h
         self._stats.dispatched += 1
+        if self._verbose:
+            print(f"[disp] seq={frame.seq} dispatched  Δhash={dist}")
 
     def take(self) -> tuple[bytes, int] | None:
-        """Return the freshest dispatchable frame, clearing the slot."""
+        """Return the freshest dispatchable frame, clearing the slot.
+
+        Resets the perceptual-hash baseline when a frame is consumed so the
+        next frame submitted after a cycle always gets through — even if the
+        screen looks identical to the last consumed frame.  Without this,
+        once the screen stabilises (e.g. an Activities overview sitting open)
+        every subsequent frame is silently dropped and the agent loops on
+        "(no new frame)" forever.
+        """
         with self._lock:
             slot = self._slot
             self._slot = None
         if slot is not None:
             self._stats.consumed += 1
+            self._last_dispatched_hash = None  # force the next frame through
         return slot
 
     def stats(self) -> DispatchStats:
