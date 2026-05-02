@@ -71,12 +71,41 @@ gst-inspect-1.0 pipewiresrc | head -3   # should print "Factory Details: ..."
 Set your API key on the same line as the Python invocation (each `!` shell call is a fresh subshell):
 
 ```sh
-ANTHROPIC_API_KEY=sk-ant-... PYTHONUNBUFFERED=1 .venv/bin/python agent.py
+ANTHROPIC_API_KEY=sk-ant-... PYTHONUNBUFFERED=1 .venv/bin/python agent.py [args]
 ```
 
-Optional CLI args: `python agent.py [duration_seconds] [goal_string]`. Default is 45 s with a generic "click the most prominent actionable element" goal.
-
 The first run prompts for screen-share consent. Subsequent runs reuse the saved token at `~/.cache/screen-agent/restore_token`.
+
+### Modes
+
+`agent.py` runs in one of two modes — pick with `--mode`.
+
+| Mode | What it does | When to use |
+|---|---|---|
+| `--mode observe` | Each cycle, Claude describes what's currently on screen. No tool calls, no actuator. | Live narration, activity logging, accessibility, monitoring, audit / review of what the agent perceives. |
+| `--mode act` *(default)* | Claude decides actions via tool calls (`click` / `move` / `type_text` / `key` / `wait`). The configured actuator handles each action. | When you want the agent to act on what it sees. Pair with the actuator option that matches your use case (see "Actuation modes" below). |
+
+Other flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--duration N` | 45 | Run time in seconds. |
+| `--period N` | 5 | Seconds between Claude calls. |
+| `--prompt "..."` | mode-appropriate default | Instruction sent to Claude each cycle. In `observe`, this is a description prompt; in `act`, it's the goal driving tool use. |
+
+Examples:
+
+```sh
+# Narrate the screen for 30 seconds.
+.venv/bin/python agent.py --mode observe --duration 30
+
+# Watch for any error dialog and describe it.
+.venv/bin/python agent.py --mode observe \
+    --prompt "Watch for any error dialog, modal, or notification. If you see one, describe it. Otherwise say 'no alerts'."
+
+# Default — Claude tries to identify and click the most prominent actionable element (dry-run).
+.venv/bin/python agent.py
+```
 
 ### Per-milestone demos
 
@@ -85,20 +114,21 @@ The first run prompts for screen-share consent. Subsequent runs reuse the saved 
 | `python capture_m1.py` | Writes ~8 JPEG frames to `/tmp/frame_*.jpg` over 2 s. Open one to verify the capture is real. |
 | `python capture_m2.py` | Prints fps/shape/mean for ~5 s of frames. Frames land in NumPy at 1280×800 BGRx. |
 | `python dispatcher_m4.py` | 15 s loop showing dispatched-vs-dropped counters. Move a window to see the change gate behave. |
-| `python inference_m5.py` | 30 s loop calling Claude every ~4 s with text-only observation. |
-| `python agent.py` | Full observe→decide→act loop with tool-using Claude (dry-run actuation). |
+| `python inference_m5.py` | 30 s loop calling Claude every ~4 s with text-only observation. (Same behavior is also available as the standard `agent.py --mode observe`.) |
+| `python agent.py` | Default mode `act` — full observe→decide→act loop with tool-using Claude (dry-run actuation). Use `--mode observe` for the description-only mode. |
 
-## Limitations and how to enable real actuation
+## Actuation modes
 
-**Capture and inference are fully working.** Input injection (M6) is dry-run on this system because GNOME 50 doesn't grant input devices to unprivileged portal clients:
+The agent's actuator is a swappable component (the `Actuator` abstract base in `actuator.py`). Pick the mode that matches your use case.
 
-- `RemoteDesktop.SelectDevices(types=keyboard|pointer)` returns `devices_bitmask=0` after `Start`.
-- `RemoteDesktop.ConnectToEIS` returns `org.freedesktop.DBus.Error.AccessDenied: Invalid session`.
-- The screen-share consent dialog has no input-grant toggle on this GNOME version.
+### Option A — DryRunActuator (default — observe + decide, no injection)
 
-To turn dry-run into real injection, pick one of:
+- **What it does:** receives the model's tool calls (`click`, `move`, `type_text`, `key`, `wait`) and prints each one with both JPEG-space and source-space coordinates. Performs no real input injection.
+- **Best for:** testing and development, audit / compliance review, human-in-the-loop approval flows, observation-only monitoring, demos, and any environment where you can't or don't want to grant the agent hardware control.
+- **Setup:** none — this is what `agent.py` uses out of the box.
+- **Limitation:** no side effects on the desktop. To actually move the cursor or type, swap to one of the modes below.
 
-### Option A — `ydotool` over `/dev/uinput` (simplest)
+### Option B — `ydotool` over `/dev/uinput` (simplest real injection)
 
 1. `sudo apt install ydotool ydotoold`
 2. `sudo usermod -aG input $USER` and **log out / log back in** (group changes don't apply to existing sessions).
@@ -108,16 +138,24 @@ To turn dry-run into real injection, pick one of:
 
 This bypasses the portal entirely and works on any Wayland compositor. Tradeoff: gives the daemon (and anything that talks to it) full keyboard/mouse access — the portal's per-app consent model is gone.
 
-### Option B — libei via `ConnectToEIS` (proper)
+### Option C — libei via `ConnectToEIS` (cleanest, but blocked by default on GNOME 50)
+
+On this system, GNOME 50 does not grant input devices to unprivileged portal clients out of the box:
+
+- `RemoteDesktop.SelectDevices(types=keyboard|pointer)` returns `devices_bitmask=0` after `Start`.
+- `RemoteDesktop.ConnectToEIS` returns `org.freedesktop.DBus.Error.AccessDenied: Invalid session`.
+- The screen-share consent dialog has no input-grant toggle on this GNOME version.
+
+To unblock it:
 
 1. Enable Remote Desktop in **Settings → System → Remote Desktop**, set "Remote Control" on (not view-only), set a password.
 2. `systemctl --user start gnome-remote-desktop.service`
 3. The portal's input grant should now succeed (`devices_bitmask` non-zero, `ConnectToEIS` returns an fd).
-4. Build a `EisActuator(Actuator)`. There are no Python bindings for libei in apt — use `ctypes` against `libei.so.1` (~half a day of work for the device-creation handshake plus pointer/keyboard frames).
+4. Build an `EisActuator(Actuator)`. There are no Python bindings for libei in apt — use `ctypes` against `libei.so.1` (~half a day of work for the device-creation handshake plus pointer/keyboard frames).
 
 This keeps the portal's consent model. Heavier setup, but cleaner long-term.
 
-### Option C — gnome-remote-desktop as the broker
+### Option D — gnome-remote-desktop as the broker
 
 Run our agent as a client of `gnome-remote-desktop` (over RDP/VNC) instead of as a portal client. Different architecture; not pursued.
 
