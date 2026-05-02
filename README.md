@@ -7,23 +7,29 @@ Built milestone-by-milestone (M0–M6). Verified on Ubuntu 26.04 LTS / GNOME 50 
 ## What it does
 
 ```
-xdg-desktop-portal (RemoteDesktop / ScreenCast)
+xdg-desktop-portal (ScreenCast)
         │
         ▼  PipeWire fd + node id
    pipewiresrc ─► videoconvert ─► videoscale (1280×800) ─► appsink
-        │                                                    │
-        │                                                    ▼ NumPy frame (BGRx)
-        │                                                    │
-        ▼                                              perceptual-hash change gate
-  GStreamer pipeline                                          │
-                                                              ▼ JPEG bytes
-                                                        Claude vision
-                                                       (Opus 4.7, tools)
-                                                              │
-                                                              ▼ tool calls
-                                                     DryRunActuator (prints)
-                                                       — or real injection,
-                                                          when enabled
+                                                             │
+                                                             ▼ NumPy frame (BGRx)
+                                                             │
+                                                     perceptual-hash change gate
+                                                             │
+                                                             ▼ JPEG bytes
+                                                       Claude vision
+                                                      (Opus 4.7, tools)
+                                                             │
+                                                             ▼ tool calls
+                                                  ┌──────────────────────┐
+                                                  │  DryRunActuator      │  (default)
+                                                  │  prints intended ops │
+                                                  └──────────────────────┘
+                                                  ┌──────────────────────┐
+                                                  │  YdotoolActuator     │  (--actuator ydotool)
+                                                  │  ydotool type/key    │
+                                                  │  via /dev/uinput     │
+                                                  └──────────────────────┘
 ```
 
 Capture is portal-mediated, so there's no X11/screenshot fallback — it runs as a normal user-space client and respects GNOME's consent model. The screencast token persists across runs (no consent dialog after the first).
@@ -36,7 +42,7 @@ Capture is portal-mediated, so there's no X11/screenshot fallback — it runs as
 | `capture.py` | GStreamer `pipewiresrc → appsink` pipeline. Delivers BGRx NumPy frames at the requested fps and aspect-correct dimensions. |
 | `dispatcher.py` | Single-slot latest-frame queue, perceptual-hash change gate, JPEG encode. Drops frames identical to the last one dispatched, so static desktops don't burn API calls. |
 | `inference.py` | Claude vision wrapper. `observe()` returns text only (M5); `decide(goal=…)` returns tool calls (M6) using `click`/`move`/`type_text`/`key`/`wait`. |
-| `actuator.py` | Abstract `Actuator` + `DryRunActuator` (prints intended actions, maps JPEG-space coords back to source-space). Real input-injection actuators slot in here. |
+| `actuator.py` | Abstract `Actuator` + `DryRunActuator` (prints, coord-maps) + `YdotoolActuator` (real uinput injection via ydotool). `type_text` uses `ydotool type` as primary (works for GNOME Shell compositor surfaces); `key` handles modifiers and the full evdev keymap. |
 | `agent.py` | End-to-end loop: capture → dispatcher → Claude (with tools) → actuator. Configurable goal + duration via argv. |
 | `capture_m1.py` `capture_m2.py` `dispatcher_m4.py` `inference_m5.py` | Per-milestone demos kept around for reference. |
 | `m6_diagnose.py` `m6_eis_probe.py` | Diagnostics for the input-grant problem on GNOME 50 (kept for documentation). |
@@ -95,6 +101,7 @@ Other flags:
 | `--actuator dry-run\|ydotool` | `dry-run` | In `act` mode only: which actuator handles tool calls. `dry-run` prints intended actions; `ydotool` injects real input (see "Actuation modes" → Option B). |
 | `--max-actions N` | 10 | Hard cap on total executed actions. The run stops when reached — runaway-action safety net. |
 | `--settle SECS` | 0.5 | Seconds to sleep after each `ydotool` call so the UI can render. Ignored for the dry-run actuator. |
+| `--save-frames DIR` | *(off)* | Debug: save each JPEG consumed by Claude to `DIR/frame_NNNNNN.jpg`. Also enables per-dispatch hash-distance logging. Useful for verifying what the model actually sees. |
 
 Examples:
 
@@ -164,23 +171,19 @@ A simple end-to-end test that exercises keys + typing without needing pixel-accu
 ydotool key 125:1 125:0
 # Press Esc to close. If this didn't open Activities, fix the setup before going further.
 
-# 2. Dry-run rehearsal — verify Claude emits the right action sequence.
-.venv/bin/python agent.py --mode act --duration 30 --period 4 --max-actions 5 \
-    --prompt "Press Super to open the Activities overview. Once you see the overview, type 'terminal' and press Return to launch a terminal. Use the wait tool between steps to let the UI catch up."
-# Expected printed sequence (across cycles): key:super → wait → type:'terminal' → wait → key:Return
-
-# 3. Real injection.
+# 2. Real injection — open edge from activities menu
 ANTHROPIC_API_KEY=sk-ant-... .venv/bin/python agent.py \
     --mode act --actuator ydotool --duration 45 --period 5 \
     --max-actions 5 --settle 0.5 \
-    --prompt "Press Super to open the Activities overview. Once you see the overview, type 'terminal' and press Return to launch a terminal. Use the wait tool between steps to let the UI catch up."
-# Expected: Activities overview opens, 'terminal' types into the search box,
-# Enter launches gnome-terminal, the next observed cycle reports the new window.
+    --prompt "Press Super to open Activities, then type edge and press Return."
+# Expected: Activities overview opens, 'terminal' appears in the search box,
 ```
 
-Common failures: ydotool not in `input` group → permission denied on the socket; daemon not running → "ydotool socket not found"; pressing Super twice within `--period` toggles overview off (mitigated by the `wait` instruction in the prompt + `--settle`).
+**Typing on GNOME Wayland:** `ydotool type` (uinput) works for GNOME Shell's own compositor surfaces (Activities search box, run dialog, etc.) because Mutter processes uinput events through libinput for its own stage. `wtype` (`zwp_virtual_keyboard_v1`) does NOT work on GNOME — Mutter does not expose that protocol. The actuator tries `ydotool type` first, then `wtype` as a fallback for wlroots-based compositors (Sway, Hyprland).
 
-### Option C — libei via `ConnectToEIS` (cleanest, but blocked by default on GNOME 50)
+**Debugging what Claude sees:** add `--save-frames /tmp/frames` to save every JPEG the model receives. Cross-reference with the `[disp] seq=N Δhash=N` lines to see which frames the dispatcher let through.
+
+### NOT IMPLEMENTED: Option C — libei via `ConnectToEIS` (cleanest, but blocked by default on GNOME 50)
 
 On this system, GNOME 50 does not grant input devices to unprivileged portal clients out of the box:
 
@@ -197,7 +200,7 @@ To unblock it:
 
 This keeps the portal's consent model. Heavier setup, but cleaner long-term.
 
-### Option D — gnome-remote-desktop as the broker
+### NOT IMPLEMENTED: Option D — gnome-remote-desktop as the broker
 
 Run our agent as a client of `gnome-remote-desktop` (over RDP/VNC) instead of as a portal client. Different architecture; not pursued.
 
