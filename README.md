@@ -130,9 +130,18 @@ The agent's actuator is a swappable component (the `Actuator` abstract base in `
 
 ### Option B — `ydotool` over `/dev/uinput` (simplest real injection)
 
-1. `sudo apt install ydotool ydotoold`
-2. `sudo usermod -aG input $USER` and **log out / log back in** (group changes don't apply to existing sessions).
-3. `systemctl --user enable --now ydotoold`
+1. Install ydotool (the package includes the daemon as `ydotool.service`):
+   ```sh
+   sudo apt install ydotool
+   ```
+2. Add your user to the `input` group and **log out / log back in** (group changes don't apply to existing sessions):
+   ```sh
+   sudo usermod -aG input $USER
+   ```
+3. Enable and start the daemon (note: the systemd unit is `ydotool.service`, not `ydotoold.service`):
+   ```sh
+   systemctl --user enable --now ydotool.service
+   ```
 4. Implement a `YdotoolActuator(Actuator)` in `actuator.py` that shells out to `ydotool mousemove --absolute -- X Y` / `click 0xC0` / `type` / `key`. (`ydotool` uses uinput keycodes; map from the model's `combo` strings.)
 5. In `agent.py`, swap `DryRunActuator(...)` for `YdotoolActuator(...)`.
 
