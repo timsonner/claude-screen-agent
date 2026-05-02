@@ -149,6 +149,11 @@ class Inferer(ABC):
     ) -> Observation: ...
 
 
+def _supports_effort(model: str) -> bool:
+    """output_config/effort is an extended-thinking feature — Opus models only."""
+    return "opus" in model.lower()
+
+
 class ClaudeInferer(Inferer):
     def __init__(
         self,
@@ -163,7 +168,7 @@ class ClaudeInferer(Inferer):
         self._client = anthropic.AsyncAnthropic()
         self._model = model
         self._max_tokens = max_tokens
-        self._effort = effort
+        self._effort = effort if _supports_effort(model) else None
         self._system_prompt_agent = (
             _SYSTEM_PROMPT_AGENT_BASE + (_LIVE_NOTE if live_mode else _DRY_RUN_NOTE)
         )
@@ -177,7 +182,7 @@ class ClaudeInferer(Inferer):
         msg = await self._client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
-            output_config={"effort": self._effort},
+            **({"output_config": {"effort": self._effort}} if self._effort else {}),
             system=[
                 {
                     "type": "text",
@@ -228,7 +233,7 @@ class ClaudeInferer(Inferer):
         msg = await self._client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
-            output_config={"effort": self._effort},
+            **({"output_config": {"effort": self._effort}} if self._effort else {}),
             system=[
                 {
                     "type": "text",

@@ -40,9 +40,9 @@ from inference import ClaudeInferer, IntendedAction
 from portal_remotedesktop import open_screencast_session
 
 DEFAULT_DURATION = 45.0
-DEFAULT_PERIOD = 5.0
+DEFAULT_PERIOD = 3.0
 DEFAULT_MAX_ACTIONS = 10
-DEFAULT_SETTLE = 0.5
+DEFAULT_SETTLE = 0.3
 
 DEFAULT_ACT_PROMPT = (
     "Watch the screen. Identify the single most prominent actionable element "
@@ -80,6 +80,9 @@ async def _main(
     max_actions: int,
     settle: float,
     save_frames: str | None = None,
+    model: str = "claude-opus-4-7",
+    effort: str | None = None,
+    capture_width: int = 1280,
 ) -> int:
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("ERROR: set ANTHROPIC_API_KEY before running.", file=sys.stderr)
@@ -89,7 +92,7 @@ async def _main(
     print(f"[agent] mode={mode}  session up — node_id={handle.node_id}")
     print(f"[agent] prompt: {prompt}")
 
-    cap = Capture(handle, fps=4, width=1280)
+    cap = Capture(handle, fps=4, width=capture_width)
     cap.start()
 
     src_w, src_h = handle.stream_props["size"]
@@ -117,12 +120,15 @@ async def _main(
         frames_dir.mkdir(parents=True, exist_ok=True)
         print(f"[agent] saving consumed frames → {frames_dir}/")
 
+    resolved_effort = effort or ("medium" if mode == "act" else "low")
     disp = Dispatcher(hamming_threshold=5, jpeg_quality=80, verbose=(frames_dir is not None))
     inferer = ClaudeInferer(
-        effort="medium" if mode == "act" else "low",
-        max_tokens=1024 if mode == "act" else 512,
+        model=model,
+        effort=resolved_effort,
+        max_tokens=300 if mode == "act" else 512,
         live_mode=(mode == "act" and actuator_kind == "ydotool"),
     )
+    print(f"[agent] model={model}  effort={resolved_effort}  capture_width={capture_width}")
 
     stop = asyncio.Event()
     cycles = 0
@@ -286,6 +292,27 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Save each consumed JPEG to DIR/frame_NNNNNN.jpg for debugging.",
     )
+    p.add_argument(
+        "--model",
+        default="claude-opus-4-7",
+        help="Claude model to use (default: claude-opus-4-7). "
+        "Faster/cheaper options: claude-haiku-4-5, claude-sonnet-4-5.",
+    )
+    p.add_argument(
+        "--effort",
+        choices=["low", "medium", "high", "xhigh"],
+        default=None,
+        help="Inference effort level (default: medium for act, low for observe). "
+        "low is faster but may misread complex screens; medium is recommended for act mode.",
+    )
+    p.add_argument(
+        "--width",
+        type=int,
+        default=1280,
+        metavar="PX",
+        help="Capture width in pixels (default 1280). Smaller = fewer image tokens = faster inference. "
+        "Try 960 for a ~40%% token reduction with minimal quality loss.",
+    )
     return p.parse_args()
 
 
@@ -305,6 +332,9 @@ if __name__ == "__main__":
                 args.max_actions,
                 args.settle,
                 save_frames=args.save_frames,
+                model=args.model,
+                effort=args.effort,
+                capture_width=args.width,
             )
         )
     )

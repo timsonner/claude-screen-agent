@@ -96,25 +96,28 @@ Other flags:
 | Flag | Default | Meaning |
 |---|---|---|
 | `--duration N` | 45 | Run time in seconds. |
-| `--period N` | 5 | Seconds between Claude calls. |
+| `--period N` | 3 | Seconds between Claude calls. |
 | `--prompt "..."` | mode-appropriate default | Instruction sent to Claude each cycle. In `observe`, this is a description prompt; in `act`, it's the goal driving tool use. |
 | `--actuator dry-run\|ydotool` | `dry-run` | In `act` mode only: which actuator handles tool calls. `dry-run` prints intended actions; `ydotool` injects real input (see "Actuation modes" → Option B). |
 | `--max-actions N` | 10 | Hard cap on total executed actions. The run stops when reached — runaway-action safety net. |
-| `--settle SECS` | 0.5 | Seconds to sleep after each `ydotool` call so the UI can render. Ignored for the dry-run actuator. |
+| `--settle SECS` | 0.3 | Seconds to sleep after each `ydotool` call so the UI can render. Ignored for the dry-run actuator. |
+| `--model MODEL` | `claude-opus-4-7` | Anthropic model ID to use for inference. Opus 4-7 is recommended for reliable screen-state recognition. Haiku/Sonnet are faster but less accurate. |
+| `--effort low\|medium\|high` | `medium` | Inference effort level (Opus models only). `medium` is required for `act` mode — `low` causes Claude to pattern-match goals without reading the screen. Ignored for non-Opus models. |
+| `--width PX` | 1280 | Resize captured frames to this width before sending to Claude. Narrower = fewer image tokens = faster + cheaper (e.g. `960` saves ~33%, `768` saves ~67%). |
 | `--save-frames DIR` | *(off)* | Debug: save each JPEG consumed by Claude to `DIR/frame_NNNNNN.jpg`. Also enables per-dispatch hash-distance logging. Useful for verifying what the model actually sees. |
 
 Examples:
 
 ```sh
 # Narrate the screen for 30 seconds.
-.venv/bin/python agent.py --mode observe --duration 30
+.venv/bin/python agent.py --mode observe --duration 30 --model claude-opus-4-7
 
 # Watch for any error dialog and describe it.
-.venv/bin/python agent.py --mode observe \
+.venv/bin/python agent.py --mode observe --model claude-opus-4-7 \
     --prompt "Watch for any error dialog, modal, or notification. If you see one, describe it. Otherwise say 'no alerts'."
 
 # Default — Claude tries to identify and click the most prominent actionable element (dry-run).
-.venv/bin/python agent.py
+.venv/bin/python agent.py --model claude-opus-4-7
 ```
 
 ### Per-milestone demos
@@ -156,7 +159,7 @@ The agent's actuator is a swappable component (the `Actuator` abstract base in `
    ```sh
    ANTHROPIC_API_KEY=sk-ant-... .venv/bin/python agent.py \
        --mode act --actuator ydotool --duration 45 --max-actions 5 \
-       --prompt "..."
+       --model claude-opus-4-7 --prompt "..."
    ```
    The `YdotoolActuator` class in `actuator.py` already implements the shell-outs to `ydotool mousemove` / `click` / `type` / `key`, including a Linux evdev key map (`super`, `Return`, `Escape`, `Tab`, modifiers, `a–z`, `0–9`, F-keys, arrows). At construction it verifies the binary is on PATH and the daemon socket exists at `$XDG_RUNTIME_DIR/.ydotool_socket` — if either is missing, the agent exits with a setup-fix message before opening a screencast session.
 
@@ -173,10 +176,10 @@ ydotool key 125:1 125:0
 
 # 2. Real injection — open edge from activities menu
 ANTHROPIC_API_KEY=sk-ant-... .venv/bin/python agent.py \
-    --mode act --actuator ydotool --duration 45 --period 5 \
-    --max-actions 5 --settle 0.5 \
+    --mode act --actuator ydotool --duration 45 --period 3 \
+    --max-actions 5 --settle 0.3 --model claude-opus-4-7 \
     --prompt "Press Super to open Activities, then type edge and press Return."
-# Expected: Activities overview opens, 'terminal' appears in the search box,
+# Expected: Activities overview opens, 'edge' appears in the search box,
 ```
 
 **Typing on GNOME Wayland:** `ydotool type` (uinput) works for GNOME Shell's own compositor surfaces (Activities search box, run dialog, etc.) because Mutter processes uinput events through libinput for its own stage. `wtype` (`zwp_virtual_keyboard_v1`) does NOT work on GNOME — Mutter does not expose that protocol. The actuator tries `ydotool type` first, then `wtype` as a fallback for wlroots-based compositors (Sway, Hyprland).

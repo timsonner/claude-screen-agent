@@ -305,7 +305,7 @@ class YdotoolActuator(Actuator):
         # next one arrives.  Without it, Super:1 and Super:0 land so close together
         # that GNOME toggles Activities open then immediately closed in one cycle.
         events = [f"{c}:1" for c in codes] + [f"{c}:0" for c in reversed(codes)]
-        err = self._run(["ydotool", "key", "--key-delay", "80", *events])
+        err = self._run(["ydotool", "key", "--key-delay", "30", *events])
         if err:
             return ActionLog(kind="error", detail=f"key failed: {err}")
         return ActionLog(kind="key", detail=combo)
